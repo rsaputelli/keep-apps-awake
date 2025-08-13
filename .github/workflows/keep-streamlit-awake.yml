@@ -3,7 +3,7 @@ name: Keep Streamlit Apps Awake
 on:
   schedule:
     - cron: "*/15 * * * *"   # every 15 minutes (UTC)
-  workflow_dispatch:          # manual run from the Actions tab
+  workflow_dispatch:
 
 concurrency:
   group: keep-streamlit-awake
@@ -12,7 +12,7 @@ concurrency:
 jobs:
   wake:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Check out repo
@@ -34,63 +34,71 @@ jobs:
           npm i playwright@^1
           npx playwright install --with-deps chromium
 
-      - name: Visit apps like a real user (auto-wake)
+      - name: Visit apps like a real user (auto-wake for 'Yes, get this app back up!')
         env:
           URL_LIST: "urls.txt"
-          DWELL_MS: "15000"
-          MAX_WAIT_MS: "900000"      # up to 15 minutes for a cold start
+          DWELL_MS: "20000"        # keep page open 20s once live
+          MAX_WAIT_MS: "600000"    # up to 10 minutes for cold starts
         run: |
           node - <<'JS'
           const fs = require('fs');
           const { chromium } = require('playwright');
 
-          async function clickIfPresent(page, locator) {
+          async function clickWake(page) {
+            // Handle cookie banners that can block the button
+            const cookieButtons = [/accept/i, /agree/i, /consent/i, /ok/i, /got it/i];
+            for (const re of cookieButtons) {
+              try {
+                const b = page.getByRole('button', { name: re }).first();
+                if (await b.isVisible()) { await b.click({ timeout: 3000 }).catch(()=>{}); }
+              } catch {}
+            }
+
+            // Click the exact Streamlit wake button
+            const exact = /Yes,\s*get this app back up!?/i;
             try {
-              if (await locator.count()) {
-                const el = locator.first();
-                if (await el.isVisible()) {
-                  await el.click({ timeout: 5000 }).catch(()=>{});
-                  return true;
-                }
+              const b1 = page.getByRole('button', { name: exact }).first();
+              if (await b1.isVisible().catch(()=>false)) {
+                console.log('Clicking wake button (role match)…');
+                await b1.click({ timeout: 5000 }).catch(()=>{});
+                return true;
               }
-            } catch(e) {}
-            return false;
-          }
+            } catch {}
 
-          async function tryAutoWake(page) {
-            // Handle cookie banners that can block the wake button
-            const cookieNames = [/accept/i, /agree/i, /consent/i, /got it/i, /ok/i];
-            for (const re of cookieNames) {
-              if (await clickIfPresent(page, page.getByRole('button', { name: re }))) break;
-            }
+            try {
+              const b2 = page.locator('button:has-text("Yes, get this app back up")').first();
+              if (await b2.isVisible().catch(()=>false)) {
+                console.log('Clicking wake button (text locator)…');
+                await b2.click({ timeout: 5000 }).catch(()=>{});
+                return true;
+              }
+            } catch {}
 
-            // Click common “wake/start/run” buttons/links
-            const wakeNames = [/wake/i, /start/i, /run/i, /get.*running/i, /continue/i, /proceed/i];
-            for (const re of wakeNames) {
-              if (await clickIfPresent(page, page.getByRole('button', { name: re }))) return true;
-              if (await clickIfPresent(page, page.getByRole('link',   { name: re }))) return true;
-            }
-            // Fallback: click any visible button containing “wake” text
-            if (await clickIfPresent(page, page.locator('button:has-text("wake")'))) return true;
+            // Fallback: any visible button/link containing "get this app back up"
+            try {
+              const any = page.locator('button, a').filter({ hasText: /get this app back up/i }).first();
+              if (await any.isVisible().catch(()=>false)) {
+                console.log('Clicking wake button (fallback)…');
+                await any.click({ timeout: 5000 }).catch(()=>{});
+                return true;
+              }
+            } catch {}
+
             return false;
           }
 
           async function waitUntilLive(page, maxWaitMs) {
-            // Consider live if a websocket opens or the Streamlit containers render
             let wsOpened = false;
             page.on('websocket', () => { wsOpened = true; });
-
-            const start = Date.now();
             const liveSel = ['[data-testid="stAppViewContainer"]','section.main','[data-testid="stSidebar"]'];
+            const start = Date.now();
 
             while (Date.now() - start < maxWaitMs) {
-              // Try clicking wake/continue if present
-              await tryAutoWake(page);
-
-              if (wsOpened) return true;
-              for (const s of liveSel) { if (await page.$(s)) return true; }
-
-              // If on a waiting/challenge page, just pause and loop
+              await clickWake(page);                       // try to wake if prompt present
+              if (wsOpened) return true;                   // Streamlit WS established
+              for (const s of liveSel) {                   // DOM shows real app
+                if (await page.$(s)) return true;
+              }
               await page.waitForTimeout(5000);
             }
             return false;
@@ -98,8 +106,8 @@ jobs:
 
           (async () => {
             const listPath = process.env.URL_LIST || 'urls.txt';
-            const dwell = parseInt(process.env.DWELL_MS || '15000', 10);
-            const maxWait = parseInt(process.env.MAX_WAIT_MS || '900000', 10);
+            const dwell = parseInt(process.env.DWELL_MS || '20000', 10);
+            const maxWait = parseInt(process.env.MAX_WAIT_MS || '600000', 10);
 
             if (!fs.existsSync(listPath)) throw new Error(`URL list not found: ${listPath}`);
             const urls = fs.readFileSync(listPath, 'utf8')
@@ -107,7 +115,7 @@ jobs:
 
             const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
             const ctx = await browser.newContext({
-              userAgent: 'Mozilla/5.0 (keep-awake)',
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36',
               viewport: { width: 1280, height: 800 }
             });
 
@@ -116,10 +124,6 @@ jobs:
               console.log('Opening', url);
               try {
                 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 180000 });
-
-                // Try an immediate auto-wake in case the interstitial is up
-                await tryAutoWake(page);
-
                 const live = await waitUntilLive(page, maxWait);
                 if (!live) {
                   console.error('Timeout waiting for app:', url);
@@ -138,3 +142,4 @@ jobs:
             await browser.close();
           })();
           JS
+
