@@ -1,0 +1,111 @@
+name: Keep Streamlit Apps Awake
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes (UTC)
+  workflow_dispatch:          # manual run from the Actions tab
+
+concurrency:
+  group: keep-streamlit-awake
+  cancel-in-progress: true
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Show URL list (sanity check)
+        run: |
+          echo "Working directory: $PWD"
+          echo "urls.txt contents:"
+          cat urls.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright (Chromium)
+        run: |
+          npm i playwright@^1
+          npx playwright install --with-deps chromium
+
+      - name: Visit apps like a real user (robust)
+        env:
+          URL_LIST: "urls.txt"
+          DWELL_MS: "15000"        # keep page open ~15s after live
+          MAX_WAIT_MS: "600000"    # allow up to 10 minutes for cold starts
+          RELOAD_EVERY_MS: "20000" # reload every 20s until live
+        run: |
+          node - <<'JS'
+          const fs = require('fs');
+          const { chromium } = require('playwright');
+
+          async function waitUntilLive(page, maxWait, reloadEvery) {
+            const start = Date.now();
+            const selectors = [
+              '[data-testid="stAppViewContainer"]',
+              'section.main',
+              '[data-testid="stSidebar"]'
+            ];
+            while (Date.now() - start < maxWait) {
+              for (const sel of selectors) {
+                const el = await page.$(sel);
+                if (el) return true;  // app container is up
+              }
+              console.log('Still waking… reloading');
+              await page.waitForTimeout(reloadEvery);
+              await page.reload({ waitUntil: 'domcontentloaded' });
+              await page.waitForTimeout(2000);
+            }
+            return false;
+          }
+
+          (async () => {
+            const listPath = process.env.URL_LIST || 'urls.txt';
+            const dwell = parseInt(process.env.DWELL_MS || "15000", 10);
+            const maxWait = parseInt(process.env.MAX_WAIT_MS || "600000", 10);
+            const reloadEvery = parseInt(process.env.RELOAD_EVERY_MS || "20000", 10);
+
+            if (!fs.existsSync(listPath)) {
+              throw new Error(`URL list not found: ${listPath}`);
+            }
+            const urls = fs.readFileSync(listPath, 'utf8')
+              .split(/\r?\n/)
+              .map(s => s.trim())
+              .filter(s => s && !s.startsWith('#'));
+
+            if (urls.length === 0) {
+              throw new Error('No URLs found in urls.txt');
+            }
+
+            const browser = await chromium.launch({ headless: true });
+            const context = await browser.newContext({ userAgent: 'Mozilla/5.0 (keep-awake)' });
+
+            for (const url of urls) {
+              const page = await context.newPage();
+              console.log('Opening', url);
+              try {
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 180000 });
+                const live = await waitUntilLive(page, maxWait, reloadEvery);
+                if (!live) {
+                  console.error('Timeout waiting for app:', url);
+                } else {
+                  await page.waitForTimeout(dwell);
+                  console.log('Kept alive:', url);
+                }
+              } catch (err) {
+                console.error('Failed on', url, err.toString());
+              } finally {
+                await page.close().catch(()=>{});
+              }
+            }
+
+            await context.close();
+            await browser.close();
+          })();
+          JS
