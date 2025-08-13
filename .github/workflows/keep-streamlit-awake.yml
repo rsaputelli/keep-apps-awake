@@ -34,78 +34,107 @@ jobs:
           npm i playwright@^1
           npx playwright install --with-deps chromium
 
-      - name: Visit apps like a real user (robust)
+      - name: Visit apps like a real user (auto-wake)
         env:
           URL_LIST: "urls.txt"
-          DWELL_MS: "15000"        # keep page open ~15s after live
-          MAX_WAIT_MS: "600000"    # allow up to 10 minutes for cold starts
-          RELOAD_EVERY_MS: "20000" # reload every 20s until live
+          DWELL_MS: "15000"
+          MAX_WAIT_MS: "900000"      # up to 15 minutes for a cold start
         run: |
           node - <<'JS'
           const fs = require('fs');
           const { chromium } = require('playwright');
 
-          async function waitUntilLive(page, maxWait, reloadEvery) {
-            const start = Date.now();
-            const selectors = [
-              '[data-testid="stAppViewContainer"]',
-              'section.main',
-              '[data-testid="stSidebar"]'
-            ];
-            while (Date.now() - start < maxWait) {
-              for (const sel of selectors) {
-                const el = await page.$(sel);
-                if (el) return true;  // app container is up
+          async function clickIfPresent(page, locator) {
+            try {
+              if (await locator.count()) {
+                const el = locator.first();
+                if (await el.isVisible()) {
+                  await el.click({ timeout: 5000 }).catch(()=>{});
+                  return true;
+                }
               }
-              console.log('Still waking… reloading');
-              await page.waitForTimeout(reloadEvery);
-              await page.reload({ waitUntil: 'domcontentloaded' });
-              await page.waitForTimeout(2000);
+            } catch(e) {}
+            return false;
+          }
+
+          async function tryAutoWake(page) {
+            // Handle cookie banners that can block the wake button
+            const cookieNames = [/accept/i, /agree/i, /consent/i, /got it/i, /ok/i];
+            for (const re of cookieNames) {
+              if (await clickIfPresent(page, page.getByRole('button', { name: re }))) break;
+            }
+
+            // Click common “wake/start/run” buttons/links
+            const wakeNames = [/wake/i, /start/i, /run/i, /get.*running/i, /continue/i, /proceed/i];
+            for (const re of wakeNames) {
+              if (await clickIfPresent(page, page.getByRole('button', { name: re }))) return true;
+              if (await clickIfPresent(page, page.getByRole('link',   { name: re }))) return true;
+            }
+            // Fallback: click any visible button containing “wake” text
+            if (await clickIfPresent(page, page.locator('button:has-text("wake")'))) return true;
+            return false;
+          }
+
+          async function waitUntilLive(page, maxWaitMs) {
+            // Consider live if a websocket opens or the Streamlit containers render
+            let wsOpened = false;
+            page.on('websocket', () => { wsOpened = true; });
+
+            const start = Date.now();
+            const liveSel = ['[data-testid="stAppViewContainer"]','section.main','[data-testid="stSidebar"]'];
+
+            while (Date.now() - start < maxWaitMs) {
+              // Try clicking wake/continue if present
+              await tryAutoWake(page);
+
+              if (wsOpened) return true;
+              for (const s of liveSel) { if (await page.$(s)) return true; }
+
+              // If on a waiting/challenge page, just pause and loop
+              await page.waitForTimeout(5000);
             }
             return false;
           }
 
           (async () => {
             const listPath = process.env.URL_LIST || 'urls.txt';
-            const dwell = parseInt(process.env.DWELL_MS || "15000", 10);
-            const maxWait = parseInt(process.env.MAX_WAIT_MS || "600000", 10);
-            const reloadEvery = parseInt(process.env.RELOAD_EVERY_MS || "20000", 10);
+            const dwell = parseInt(process.env.DWELL_MS || '15000', 10);
+            const maxWait = parseInt(process.env.MAX_WAIT_MS || '900000', 10);
 
-            if (!fs.existsSync(listPath)) {
-              throw new Error(`URL list not found: ${listPath}`);
-            }
+            if (!fs.existsSync(listPath)) throw new Error(`URL list not found: ${listPath}`);
             const urls = fs.readFileSync(listPath, 'utf8')
-              .split(/\r?\n/)
-              .map(s => s.trim())
-              .filter(s => s && !s.startsWith('#'));
+              .split(/\r?\n/).map(s => s.trim()).filter(s => s && !s.startsWith('#'));
 
-            if (urls.length === 0) {
-              throw new Error('No URLs found in urls.txt');
-            }
-
-            const browser = await chromium.launch({ headless: true });
-            const context = await browser.newContext({ userAgent: 'Mozilla/5.0 (keep-awake)' });
+            const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+            const ctx = await browser.newContext({
+              userAgent: 'Mozilla/5.0 (keep-awake)',
+              viewport: { width: 1280, height: 800 }
+            });
 
             for (const url of urls) {
-              const page = await context.newPage();
+              const page = await ctx.newPage();
               console.log('Opening', url);
               try {
                 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 180000 });
-                const live = await waitUntilLive(page, maxWait, reloadEvery);
+
+                // Try an immediate auto-wake in case the interstitial is up
+                await tryAutoWake(page);
+
+                const live = await waitUntilLive(page, maxWait);
                 if (!live) {
                   console.error('Timeout waiting for app:', url);
                 } else {
                   await page.waitForTimeout(dwell);
                   console.log('Kept alive:', url);
                 }
-              } catch (err) {
-                console.error('Failed on', url, err.toString());
+              } catch (e) {
+                console.error('Failed on', url, e.toString());
               } finally {
                 await page.close().catch(()=>{});
               }
             }
 
-            await context.close();
+            await ctx.close();
             await browser.close();
           })();
           JS
