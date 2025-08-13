@@ -10,8 +10,8 @@ jobs:
     steps:
       - name: Ping Supabase REST
         env:
-          SUPABASE_URL: ${{ https://xpjewdvgkwunvocrihyq.supabase.co }}   # https://<project-ref>.supabase.co
-          SUPABASE_KEY: ${{eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhwamV3ZHZna3d1bnZvY3JpaHlxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM3OTg1NTksImV4cCI6MjA2OTM3NDU1OX0.1YbKo5hE2wrQZVgCb0jD-h0JsVX5LbU_k6P5_Ddv89k }}   # ANON key (not service_role)
+          SUPABASE_URL: ${{https://xpjewdvgkwunvocrihyq.supabase.co}}   # https://<project-ref>.supabase.co
+          SUPABASE_KEY: ${{eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhwamV3ZHZna3d1bnZvY3JpaHlxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM3OTg1NTksImV4cCI6MjA2OTM3NDU1OX0.1YbKo5hE2wrQZVgCb0jD-h0JsVX5LbU_k6P5_Ddv89k}}   # ANON key (not service_role)
         run: |
           set -e
           curl -sSf "$SUPABASE_URL/rest/v1/prospects?select=id&limit=1" \
