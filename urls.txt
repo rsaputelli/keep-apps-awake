@@ -5,4 +5,4 @@ https://scaap-stripe-recon.streamlit.app/
 https://lutine-client-crm.streamlit.app/
 https://website-image-search.streamlit.app/
 https://site-search-w-pptx.streamlit.app/
-https://sempa-chat-api.onrender.com/healthz
+
